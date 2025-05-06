@@ -3,7 +3,7 @@ import User from "@/lib/models/User";
 import bcrypt from "bcryptjs";
 import { NextResponse } from "next/server";
 
-interface AdminSeed {
+interface AccountSeed {
   username: string;
   email: string;
   password: string;
@@ -15,34 +15,59 @@ export async function GET() {
     await connectToDB();
 
     // Define admin accounts to seed
-    const adminAccounts: AdminSeed[] = [
-      {
-        username: "admin1",
-        email: "admin1@example.com",
-        password: "passAdmin1",
-      },
-      {
-        username: "admin2",
-        email: "admin2@example.com",
-        password: "passAdmin2",
-      },
-      {
-        username: "admin3",
-        email: "admin3@example.com",
-        password: "passAdmin3",
-      },
-    ];
+    // const adminAccounts: AccountSeed[] = [
+    //   {
+    //     username: "admin1",
+    //     email: "admin1@example.com",
+    //     password: "passAdmin1",
+    //   },
+    //   {
+    //     username: "admin2",
+    //     email: "admin2@example.com",
+    //     password: "passAdmin2",
+    //   },
+    //   {
+    //     username: "admin3",
+    //     email: "admin3@example.com",
+    //     password: "passAdmin3",
+    //   },
+    // ];
 
+    // const staffAccounts: AccountSeed[] = [
+    //   {
+    //     username: "staff1",
+    //     email: "staff1@example.com",
+    //     password: "passStaff1",
+    //   },
+    //   {
+    //     username: "staff2",
+    //     email: "staff2@example.com",
+    //     password: "passStaff2",
+    //   }
+    // ]    
+
+    const studetnAccount: AccountSeed[] = [
+      {
+        username: "student1",
+        email: "student1@example.com",
+        password: "passStudent1",
+      },
+      {
+        username: "student2",
+        email: "student2@example.com",
+        password: "passStudent2",
+      }
+    ]    
     const results = [];
 
     // Create admin accounts
-    for (const admin of adminAccounts) {
+    for (const account of studetnAccount) {
       // Check if username already exists
-      const existingUser = await User.findOne({ username: admin.username });
+      const existingUser = await User.findOne({ username: account.username });
       
       if (existingUser) {
         results.push({
-          username: admin.username,
+          username: account.username,
           status: "skipped",
           message: "User already exists"
         });
@@ -50,14 +75,14 @@ export async function GET() {
       }
       
       // Hash password
-      const hashedPassword = await bcrypt.hash(admin.password, 10);
+      const hashedPassword = await bcrypt.hash(account.password, 10);
       
       // Create new admin user
       const newAdmin = await User.create({
-        username: admin.username,
-        email: admin.email,
+        username: account.username,
+        email: account.email,
         password: hashedPassword,
-        role: "admin",
+        role: "staff",
         isActive: true,
         phone: "",
         lastLogin: null

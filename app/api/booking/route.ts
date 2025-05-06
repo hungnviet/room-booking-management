@@ -313,210 +313,146 @@ export async function POST(request: Request) {
 }
 
 // Update booking status (admin only)
+// PUT /api/bookings
 export async function PUT(request: Request) {
   try {
-    // Get user information from cookies
+    /* ──────────────────────────────────── 1. AUTH ─────────────────────────────────── */
     const cookieStore = await cookies();
-    const userId = cookieStore.get("userId")?.value;
     const role = cookieStore.get("role")?.value;
-    
-    // Only admin can update booking status
+
     if (role !== "admin") {
-      return NextResponse.json({ 
-        message: "Unauthorized: Admin access required" 
-      }, { status: 403 });
+      return NextResponse.json(
+        { message: "Unauthorized: Admin access required" },
+        { status: 403 }
+      );
     }
-    
-    // Parse request body
-    const body = await request.json();
-    const { 
-      bookingId,
-      status,
-      adminNote
-    } = body;
-    
-    // Validation
+
+    /* ─────────────────────────────── 2. REQUEST VALIDATION ─────────────────────────── */
+    const { bookingId, status, adminNote } = await request.json();
+
     if (!bookingId || !status) {
-      return NextResponse.json({ 
-        message: "Booking ID and status are required" 
-      }, { status: 400 });
+      return NextResponse.json(
+        { message: "Booking ID and status are required" },
+        { status: 400 }
+      );
     }
-    
     if (!["ACCEPTED", "REJECTED"].includes(status)) {
-      return NextResponse.json({ 
-        message: "Invalid status. Must be ACCEPTED or REJECTED" 
-      }, { status: 400 });
+      return NextResponse.json(
+        { message: "Invalid status. Must be ACCEPTED or REJECTED" },
+        { status: 400 }
+      );
     }
-    
-    // Connect to database
+
+    /* ───────────────────────────────── 3. LOAD DATA ───────────────────────────────── */
     await connectToDB();
-    
-    // Find the booking
-    console.log("Booking ID:", bookingId);
-    const booking = await Booking.findOne({ booking_id : bookingId });
+
+    const booking = await Booking.findOne({ booking_id: bookingId });
     if (!booking) {
-      return NextResponse.json({ 
-        message: "Booking not found" 
-      }, { status: 404 });
+      return NextResponse.json({ message: "Booking not found" }, { status: 404 });
     }
-    
-    // Can only update PENDING bookings
     if (booking.status !== "PENDING") {
-      return NextResponse.json({ 
-        message: "Only pending bookings can be updated" 
-      }, { status: 400 });
+      return NextResponse.json(
+        { message: "Only pending bookings can be updated" },
+        { status: 400 }
+      );
     }
-    
-    // Start transaction for atomicity
+
+    /* ───────────────────────────── 4. ATOMIC TRANSACTION ──────────────────────────── */
     const session = await mongoose.startSession();
     session.startTransaction();
-    
     try {
-      // Update booking status
-      const updatedBooking = await Booking.findByIdAndUpdate(
+      /* ---- 4‑a. flip the booking’s status ---- */
+      await Booking.findByIdAndUpdate(
         booking._id,
-        { 
+        {
           status,
-          note: adminNote ? `${booking.note || ''}\n\nAdmin Note: ${adminNote}` : booking.note 
+          note: adminNote
+            ? `${booking.note || ""}\n\nAdmin: ${adminNote}`
+            : booking.note,
         },
-        { new: true, runValidators: true, session }
+        { session, runValidators: true }
       );
-      
-      // If accepted, add to room schedules
+
+      /* ---- 4‑b. if ACCEPTED → write a schedule sub‑doc ---- */
       if (status === "ACCEPTED") {
-        // Get the room
         const room = await Room.findById(booking.room_id).session(session);
-        if (!room) {
-          await session.abortTransaction();
-          session.endSession();
-          return NextResponse.json({ 
-            message: "Room not found" 
-          }, { status: 404 });
-        }
-        
-        // Check for conflicts again (double-check)
-        const hasConflict = room.schedules?.some((schedule: any) => {
-          // Check if on the same date
-          const scheduleDate = new Date(schedule.date);
-          const bookingDate = new Date(booking.booking_date);
-          const sameDate = 
-            scheduleDate.getFullYear() === bookingDate.getFullYear() &&
-            scheduleDate.getMonth() === bookingDate.getMonth() &&
-            scheduleDate.getDate() === bookingDate.getDate();
-            
-          if (!sameDate) return false;
-          
-          // Check time overlap
-          const scheduleStart = new Date(schedule.start_time);
-          const scheduleEnd = new Date(schedule.end_time);
-          const bookingStart = new Date(booking.start_time);
-          const bookingEnd = new Date(booking.end_time);
-          
+        if (!room) throw new Error("Room not found");
+
+        /* conflict check (same date & overlapping time) */
+        const clash = room.schedules.some((s: any) => {
+          const sameDay =
+            s.date.toDateString() === booking.booking_date.toDateString();
+          if (!sameDay) return false;
+
           return (
-            (bookingStart >= scheduleStart && bookingStart < scheduleEnd) || 
-            (bookingEnd > scheduleStart && bookingEnd <= scheduleEnd) || 
-            (bookingStart <= scheduleStart && bookingEnd >= scheduleEnd)
+            (booking.start_time >= s.start_time &&
+              booking.start_time < s.end_time) ||
+            (booking.end_time > s.start_time && booking.end_time <= s.end_time) ||
+            (booking.start_time <= s.start_time &&
+              booking.end_time >= s.end_time)
           );
         });
-        
-        if (hasConflict) {
-          await session.abortTransaction();
-          session.endSession();
-          return NextResponse.json({ 
-            message: "Room is already booked for the selected time" 
-          }, { status: 409 });
+        if (clash) {
+          throw new Error("Room is already booked for the selected time");
         }
-        console.log("No conflict found, proceeding to add schedule");
-        // Add to room schedules
-        const scheduleDate = new Date(booking.booking_date);
-        const startTime = new Date(booking.start_time);
-        const endTime = new Date(booking.end_time);
-        const userId = new mongoose.Types.ObjectId(booking.user_id);
 
-        // Add to room schedules with explicit type conversions
-        const result = await Room.findByIdAndUpdate(
-          booking.room_id,
-          {
-            $push: {
-              schedules: {
-                date: scheduleDate,
-                start_time: startTime,
-                end_time: endTime,
-                user_id: userId,
-                note: booking.note || ""
-              }
-            }
-          },
-          { 
-            session,
-            new: true, // Return the updated document
-            runValidators: true // Run schema validation
-          }
-        );
-
-        // Log the result for debugging
-        console.log("Room update result:", result ? "Success" : "Failed", 
-          "Schedule count:", result?.schedules?.length || 0);
-
-        // Verify that the update worked
-        if (!result || !result.schedules || result.schedules.length === 0) {
-          console.error("Failed to add schedule to room");
-          await session.abortTransaction();
-          session.endSession();
-          return NextResponse.json({ 
-            message: "Error adding schedule to room" 
-          }, { status: 500 });
-        }
+        /* push schedule + validate */
+        room.schedules.push({
+          date: booking.booking_date,
+          start_time: booking.start_time,
+          end_time: booking.end_time,
+          user_id: booking.user_id, // already an ObjectId
+          note: booking.note || "",
+        });
+        await room.save({ session }); // runs ScheduleSchema validation
       }
-      
-      // Commit transaction
+
       await session.commitTransaction();
-      session.endSession();
-      
-      // Populate the room and user information for response
-      const populatedBooking = await Booking.findById(booking._id)
-        .populate('room_id', 'room_id name location')
-        .populate('user_id', 'name email');
-      
-      return NextResponse.json({ 
-        message: `Booking ${status === "ACCEPTED" ? "approved" : "rejected"} successfully`,
-        booking: {
-          id: populatedBooking._id,
-          booking_id: populatedBooking.booking_id,
-          room: {
-            id: populatedBooking.room_id._id,
-            room_id: populatedBooking.room_id.room_id,
-            name: populatedBooking.room_id.name,
-            location: populatedBooking.room_id.location,
-          },
-          user: {
-            id: populatedBooking.user_id._id,
-            name: populatedBooking.user_id.name,
-            email: populatedBooking.user_id.email,
-          },
-          booking_date: populatedBooking.booking_date,
-          start_time: populatedBooking.start_time,
-          end_time: populatedBooking.end_time,
-          note: populatedBooking.note,
-          status: populatedBooking.status,
-          updatedAt: populatedBooking.updatedAt
-        }
-      });
-    } catch (error) {
-      // If error occurs, abort transaction
+    } catch (err) {
       await session.abortTransaction();
+      throw err;
+    } finally {
       session.endSession();
-      throw error;
     }
-  } catch (error: unknown) {
-    console.error("Error updating booking:", error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    return NextResponse.json({ 
-      message: "Error updating booking",
-      error: errorMessage
-    }, { status: 500 });
+
+    /* ──────────────────────────── 5. RELOAD FOR RESPONSE ─────────────────────────── */
+    const populated = await Booking.findById(booking._id)
+      .populate("room_id", "room_id name location")
+      .populate("user_id", "name email");
+
+    return NextResponse.json({
+      message: `Booking ${status === "ACCEPTED" ? "approved" : "rejected"} successfully`,
+      booking: {
+        id: populated._id,
+        booking_id: populated.booking_id,
+        room: {
+          id: populated.room_id._id,
+          room_id: populated.room_id.room_id,
+          name: populated.room_id.name,
+          location: populated.room_id.location,
+        },
+        user: {
+          id: populated.user_id._id,
+          name: populated.user_id.name,
+          email: populated.user_id.email,
+        },
+        booking_date: populated.booking_date,
+        start_time: populated.start_time,
+        end_time: populated.end_time,
+        note: populated.note,
+        status: populated.status,
+        updatedAt: populated.updatedAt,
+      },
+    });
+  } catch (err: any) {
+    console.error("Error updating booking:", err);
+    return NextResponse.json(
+      { message: err.message || "Server error" },
+      { status: 500 }
+    );
   }
 }
+
 
 // DELETE: Cancel a booking
 export async function DELETE(request: Request) {
